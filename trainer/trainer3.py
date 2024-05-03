@@ -150,7 +150,7 @@ def train_model():
     model.test_dataset = NPZDataset(test_images, test_labels, transform=transform)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath='checkpoints/',
+        dirpath='/vol/actual/checkpoints/',
         filename='best-checkpoint',
         save_top_k=1,
         verbose=True,
