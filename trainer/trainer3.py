@@ -56,6 +56,7 @@ class NPZDataset(Dataset):
 
 def load_data(data_dir, val_size=0.2, test_size=0.1):
     file_paths = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.npz')]
+    print(f"Found {len(file_paths)} files: {file_paths}")
     # file_paths = file_paths[:5]
     train_val_paths, test_paths = train_test_split(file_paths, test_size=test_size, random_state=42)
     train_paths, val_paths = train_test_split(train_val_paths, test_size=val_size, random_state=42)
