@@ -7,12 +7,18 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 from pytorch_lightning import Trainer, LightningModule, LightningDataModule
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
+from torchvision import transforms
 
 logging.basicConfig(level=logging.INFO)
 stdout_logger = logging.getLogger(__name__)
-img = Image.debian_slim().pip_install("numpy", "transformers", "datasets", "glob2", "lightning", "tensorboard")
+img = Image.debian_slim().pip_install("numpy", "transformers", "datasets", "glob2", "lightning", "tensorboard", "torchvision")
 app = App("trainer3")
 volume = Volume.from_name('bigdata')
+
+# transform = transforms.Compose([
+#     transforms.ToTensor(),
+#     transforms.Normalize(, std)
+# ])
 
 class Normalization(torch.nn.Module):
     def __init__(self, mean, std):
@@ -38,9 +44,12 @@ class TFNet(LightningModule):
         self.save_hyperparameters(config)
         stdout_logger.info(f"kernel size: {self.hparams.kernel_size}")
         padding = ((self.hparams.kernel_size[0] - 1) // 2, (self.hparams.kernel_size[1] - 1) // 2)
+        self.transform = transforms.Compose([
+            # transforms.ToTensor(),
+            transforms.Normalize(mean=self.hparams.mean, std=self.hparams.std)
+        ])
         # Ensure the output has num_classes channels
         self.layers = torch.nn.Sequential(
-            Normalization(self.hparams.mean, self.hparams.std),
             torch.nn.Conv2d(self.hparams.num_inputs, self.hparams.num_hidden, self.hparams.kernel_size, padding=padding),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(self.hparams.num_hidden, self.hparams.num_outputs, self.hparams.kernel_size, padding=padding),
@@ -48,6 +57,8 @@ class TFNet(LightningModule):
         )
     
     def forward(self, x):
+        x = self.transform(x)
+        x = x.permute(0, 3, 1, 2)
         return self.layers(x)
     
     def training_step(self, batch, batch_idx):
@@ -59,9 +70,12 @@ class TFNet(LightningModule):
     
     def validation_step(self, batch, batch_idx):
         inputs, labels = batch
+        labels = labels.long()  # Ensure labels are the correct type
+        labels = labels.squeeze(1)  # Convert labels from [batch_size, 1, height, width] to [batch_size, height, width]
         predictions = self(inputs)
         loss = torch.nn.functional.cross_entropy(predictions, labels)
         self.log('val_loss', loss)
+        return loss
     
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-3)
@@ -131,7 +145,7 @@ def read_dataset(train_test_ratio: float):
         return {key: np.concatenate(values) for key, values in batch.items()}
     # stdout_logger.info(os.listdir(data_path))
     files = glob(os.path.join(data_path, '*.npz'))
-    files = files[:3]
+    files = files[:2]
     # stdout_logger.info(f"pwd: {os.getcwd()}, Files found: {files}")
     dataset = (
         Dataset.from_dict({'filename': files})

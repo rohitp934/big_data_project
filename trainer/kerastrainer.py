@@ -8,7 +8,9 @@ from modal import App, Image, Volume, gpu
 # Initialize modal variables
 app = App("ktrainer")
 volume = Volume.from_name('bigdata')
-img = Image.debian_slim().pip_install("numpy", "tensorflow")
+img = Image.from_registry(
+    "tensorflow/tensorflow:2.12.0-gpu",
+).pip_install("protobuf==3.20.*", "numpy")
 
 # Default values.
 EPOCHS = 100
@@ -21,34 +23,38 @@ NUM_CLASSES = 9
 TRAIN_TEST_RATIO = 90  # percent for training, the rest for testing/validation
 SHUFFLE_BUFFER_SIZE = BATCH_SIZE * 8
 
-def load_npz_file(file_path = "/vol/actual/npz") -> tuple[tf.Tensor, tf.Tensor]:
-    """Loads a training example from NPZ files.
+def load_npz_file(file_path_tensor):
+    """Loads a training example from NPZ files."""
+    # Read the file content as bytes
+    file_content = tf.io.read_file(file_path_tensor)
+    
+    # Use a numpy-compatible way to load from buffer
+    def numpy_load_from_buffer(buffer):
+        from io import BytesIO
+        with BytesIO(buffer) as f:
+            data = np.load(f, allow_pickle=True)
+            # Assuming 'inputs' and 'labels' are the keys in your npz file
+            inputs = data['inputs']
+            labels = data['labels']
+            return inputs, labels
 
-    Args:
-        file_path: Path to the NPZ file.
+    # Convert the tensor bytes to numpy arrays
+    inputs, labels = tf.py_function(numpy_load_from_buffer, [file_content], [tf.float32, tf.uint8])
+    
+    # Ensure the shapes are set correctly as `py_function` loses shape information
+    inputs.set_shape([None, None, NUM_INPUTS])
+    labels.set_shape([None, None, 1])
 
-    Returns: An (inputs, labels) pair of tensors.
-    """
-    data = np.load(file_path)
-    inputs = tf.convert_to_tensor(data['inputs'], dtype=tf.float32)
-    labels = tf.convert_to_tensor(data['labels'], dtype=tf.uint8)
+    # One-hot encode the labels
+    one_hot_labels = tf.one_hot(tf.squeeze(labels, axis=-1), NUM_CLASSES)
+    
+    return inputs, one_hot_labels
 
-    # Classifications are measured against one-hot encoded vectors.
-    one_hot_labels = tf.one_hot(labels, NUM_CLASSES)
-    return (inputs, one_hot_labels)
-
-def read_dataset(data_path: str) -> tf.data.Dataset:
-    """Reads NPZ files from a directory into a tf.data.Dataset.
-
-    Args:
-        data_path: Local or Cloud Storage directory path where the NPZ files are stored.
-
-    Returns: A tf.data.Dataset with the contents of the NPZ files.
-    """
+def read_dataset(data_path: str):
+    """Reads NPZ files from a directory into a tf.data.Dataset."""
     file_pattern = tf.io.gfile.glob(data_path + '/*.npz')
     dataset = tf.data.Dataset.from_tensor_slices(file_pattern)
-    dataset = dataset.map(lambda x: load_npz_file(x), num_parallel_calls=tf.data.AUTOTUNE)
-    return dataset
+    return dataset.map(load_npz_file, num_parallel_calls=tf.data.AUTOTUNE)
 
 def split_dataset(
     dataset: tf.data.Dataset,
