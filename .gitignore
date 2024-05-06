@@ -1,9 +1,10 @@
 .DS_Store
 *.pdf
 data*/
-/.idea/misc.xml
-/.idea/inspectionProfiles/profiles_settings.xml
-/.idea/inspectionProfiles/Project_Default.xml
-/.idea/vcs.xml
-/.idea/workspace.xml
-/big-data
+/.idea
+/modal/
+/trial-data
+/bigdata/
+/.ipynb_checkpoints
+/actual
+/trainer/__pycache__/
