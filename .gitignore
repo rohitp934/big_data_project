@@ -5,6 +5,7 @@ data*/
 /modal/
 /trial-data
 /bigdata/
+/big-data/
 /.ipynb_checkpoints
 /actual
 /trainer/__pycache__/
