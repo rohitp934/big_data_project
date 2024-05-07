@@ -27,7 +27,7 @@ KERNEL_SIZE = 5
 tf.config.experimental.set_visible_devices([], "GPU")
 
 app = App("flax-climate-forecast")
-volume = Volume.from_name("climate-forecast")
+volume = Volume.from_name("bigdata")
 img = Image.debian_slim().pip_install(
     "flax",
     "numpy",
@@ -143,12 +143,7 @@ class CNN_LandCover(nn.Module):
     def __call__(self, x):
         x = nn.Conv(features=32, kernel_size=(KERNEL_SIZE, KERNEL_SIZE))(x)
         x = nn.relu(x)
-        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
         x = nn.ConvTranspose(features=16, kernel_size=(KERNEL_SIZE, KERNEL_SIZE))(x)
-        x = nn.relu(x)
-        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
-        x = x.reshape((x.shape[0], -1))  # Flatten
-        x = nn.Dense(features=256)(x)
         x = nn.relu(x)
         x = nn.Dense(features=NUM_CLASSES)(x)
 
@@ -171,10 +166,10 @@ class CNN_LST(nn.Module):
 @jax.jit
 def apply_lc(state, images, lc):
     """Computes gradients, loss and accuracy for a single batch."""
-
+    print(f"images shape: {images.shape}, lc shape: {lc.shape}")
+    one_hot = jax.nn.one_hot(lc[:,:,:,-1], NUM_CLASSES)
     def loss_fn(params):
         logits = state.apply_fn({"params": params}, images)
-        one_hot = jax.nn.one_hot(lc, NUM_CLASSES)
         loss = optax.losses.softmax_cross_entropy(
             logits=logits, labels=one_hot
         ).mean()  # Softmax Cross Entropy for Classification
@@ -182,7 +177,8 @@ def apply_lc(state, images, lc):
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, logits), grads = grad_fn(state.params)
-    accuracy_c = jnp.mean(jnp.argmax(logits, -1) == lc)
+    accuracy_c = jnp.mean(jnp.argmax(logits, -1) == jnp.argmax(one_hot, -1))
+
     return grads, loss, accuracy_c
 
 # %%
@@ -225,6 +221,7 @@ def train_epoch(state, train_ds, batch_size, rng, label: Literal["lc", "lst"]):
 
         if label == "lc":
             batch_labels = jnp.array(train_ds[1][perm, ...], dtype=jnp.uint8)
+            # print(f"Batch images shape: {batch_images.shape}, Batch labels shape: {batch_labels.shape}")
             grads, loss, acc = apply_lc(state, batch_images, batch_labels)
         else:
             batch_labels = jnp.array(train_ds[2][perm, ...], dtype=jnp.float32)
@@ -342,8 +339,8 @@ def train_and_evaluate(
         ckpt_manager.wait_until_finished()
 
     summary_writer.flush()
+    volume.commit()
     return state
-
 
 # %%
 if __name__ == "__main__":
@@ -353,18 +350,30 @@ if __name__ == "__main__":
     config.batch_size = 32
     config.num_epochs = 100
     config.train_test_split = 0.9
-    ckpt_dir = os.path.abspath("../models/flax/checkpoints")
-    state = train_and_evaluate(
-        config, "../data/v2/climate_change", "../models/flax/logs", ckpt_dir, "lst"
-    )
     with app.run(detach=True):
         train_and_evaluate.remote(
             config,
-            "/vol/v2/data/",
-            "/vol/flax/lc/logs",
-            "/vol/flax/lc/checkpoints",
+            "/vol/new/",
+            "/vol/flax/lc2/logs",
+            "/vol/flax/lc2/checkpoints",
             "lc",
         )
+
+# %%
+# rng = jax.random.key(0)
+# rng, init_rng = jax.random.split(rng)
+# state = create_train_state(init_rng, config, "lc")
+# pytree = {"model": state}
+# ckpt_dir = os.path.abspath("../inference/latest/flax/lc/checkpoints/")
+# ckpt_options = ocp.CheckpointManagerOptions(
+#     max_to_keep=3,
+# )
+# ckpt_manager = ocp.CheckpointManager(
+#     ckpt_dir,
+#     options=ckpt_options,
+# )
+# model = ckpt_manager.restore(99, args=ocp.args.StandardRestore(pytree))
+# model
 
 # %%
 
