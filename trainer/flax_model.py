@@ -167,9 +167,9 @@ class CNN_LandCover(nn.Module):
 class CNN_LST(nn.Module):
     @nn.compact
     def __call__(self, x):
-        x = nn.Conv(features=64, kernel_size=(KERNEL_SIZE, KERNEL_SIZE))(x)
+        x = nn.Conv(features=32, kernel_size=(KERNEL_SIZE, KERNEL_SIZE))(x)
         x = nn.relu(x)
-        x = nn.ConvTranspose(features=128, kernel_size=(KERNEL_SIZE, KERNEL_SIZE))(x)
+        x = nn.ConvTranspose(features=16, kernel_size=(KERNEL_SIZE, KERNEL_SIZE))(x)
         x = nn.relu(x)
         x = nn.Dense(features=1)(x)
         x = nn.relu(x)  # No negative temperatures (since it is in Kelvin)
@@ -201,18 +201,23 @@ def apply_lc(state, images, lc):
 # %%
 @jax.jit
 def apply_lst(state, images, lst):
-    """Computes gradients, loss and accuracy for a single batch."""
+    """Computes gradients, loss, and accuracy for a single batch."""
 
     def loss_fn(params):
+        """Calculate loss based on parameters."""
+        # Generate logits based on current parameters.
         logits = state.apply_fn({"params": params}, images)
-        loss = optax.losses.squared_error(
-            predictions=logits, targets=lst
-        ).mean()  # MSE for Regression
-        return loss
+        # Compute mean squared error loss.
+        loss = optax.losses.squared_error(predictions=logits, targets=lst).mean()
+        return loss, logits
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=False)
-    loss, grads = grad_fn(state.params)
-    return grads, loss, None
+    # Compute gradients and loss, grads needs to be based on params directly influencing loss
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, logits), grads = grad_fn(state.params)
+    # We calculate logits again for returning, which is not efficient but necessary for the return
+    # logits = state.apply_fn({"params": state.params}, images)
+
+    return grads, loss, None, logits
 
 
 # %%
@@ -244,7 +249,7 @@ def train_epoch(state, train_ds, batch_size, rng, label: Literal["lc", "lst"]):
             grads, loss, acc, _ = apply_lc(state, batch_images, batch_labels)
         else:
             batch_labels = jnp.array(train_ds[2][perm, ...], dtype=jnp.float32)
-            grads, loss, acc = apply_lst(state, batch_images, batch_labels)
+            grads, loss, acc, _ = apply_lst(state, batch_images, batch_labels)
         state = update_model(state, grads)
         epoch_loss.append(loss)
         if label == "lc":
@@ -294,7 +299,6 @@ def train_and_evaluate(
     work_dir: str,
     ckpt_dir: str,
     label: Literal["lc", "lst"],
-    train_save_dir: str,
     test_save_dir: str,
 ) -> train_state.TrainState:
     """Execute model training and evaluation loop.
@@ -350,11 +354,13 @@ def train_and_evaluate(
         )
 
         if label == "lc":
-            _, test_loss, test_accuracy, test_logits = apply_lc(
+            _, test_loss, test_accuracy, logits = apply_lc(
                 state, test_images, test_labels
             )
         elif label == "lst":
-            _, test_loss, test_accuracy = apply_lst(state, test_images, test_labels)
+            _, test_loss, test_accuracy, logits = apply_lst(
+                state, test_images, test_labels
+            )
         else:
             raise ValueError(f"Unknown label: {label}")
 
@@ -370,12 +376,11 @@ def train_and_evaluate(
         summary_writer.scalar("test_loss", test_loss, epoch)
 
         checkpoints.save_checkpoint(ckpt_dir, state, epoch, prefix="", keep=3)
-        if label == "lc":
-            if epoch % 10 == 0:
-                # Save test preds
-                save_predictions(
-                    epoch, test_images, test_labels, test_logits, train_save_dir, label
-                )
+        if epoch % 10 == 0:
+            # Save test preds
+            save_predictions(
+                epoch, test_images, test_labels, logits, test_save_dir, label
+            )
         # ckpt = {"model": state}
         # ckpt_manager.save(epoch, args=ocp.args.StandardSave(ckpt))
         # ckpt_manager.wait_until_finished()
@@ -389,7 +394,7 @@ def train_and_evaluate(
 config = ml_collections.ConfigDict()
 
 config.learning_rate = 0.001
-config.batch_size = 16
+config.batch_size = 8
 config.num_epochs = 250
 config.img_size = 128
 config.train_test_split = 0.9
@@ -401,9 +406,8 @@ def main():
     train_and_evaluate.remote(
         config,
         "/vol/v2/data/",
-        "/vol/v2/flax/lc/logs",
-        "/vol/v2/flax/lc/checkpoints",
-        "lc",
-        "/vol/v2/flax/lc/train",
-        "/vol/v2/flax/lc/test",
+        "/vol/v2/flax/lst/logs",
+        "/vol/v2/flax/lst/checkpoints",
+        "lst",
+        "/vol/v2/flax/lst/test",
     )
