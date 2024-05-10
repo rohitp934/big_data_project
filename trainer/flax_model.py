@@ -1,7 +1,7 @@
 # %%
 import os
 from glob import glob
-from typing import Tuple, Literal, Union
+from typing import Tuple, Literal
 
 import flax.linen as nn
 import jax
@@ -12,8 +12,9 @@ import optax
 import orbax.checkpoint as ocp
 import tensorflow as tf
 from flax.metrics import tensorboard
+
 # from flax.core import FrozenDict
-from flax.training import orbax_utils, train_state
+from flax.training import train_state, checkpoints
 from modal import App, Image, Volume, gpu
 from scipy.ndimage import gaussian_filter
 from tqdm import tqdm
@@ -27,7 +28,7 @@ KERNEL_SIZE = 5
 tf.config.experimental.set_visible_devices([], "GPU")
 
 app = App("flax-climate-forecast")
-volume = Volume.from_name("bigdata")
+volume = Volume.from_name("climate-forecast")
 img = Image.debian_slim().pip_install(
     "flax",
     "numpy",
@@ -44,9 +45,10 @@ img = img.run_commands(
         "python -m site",
         "pip list | grep nvidia",
         "export PATH=/usr/local/cuda-12/bin:$PATH",
-        "export LD_LIBRARY_PATH=/usr/local/cuda-12/lib64:/usr/local/lib/python3.11/site-packages/tensorrt_libs/:$LD_LIBRARY_PATH:"
+        "export LD_LIBRARY_PATH=/usr/local/cuda-12/lib64:/usr/local/lib/python3.11/site-packages/tensorrt_libs/:$LD_LIBRARY_PATH:",
     ]
 )
+
 
 # %%
 def read_example(serialized: bytes) -> Tuple[jax.Array, jax.Array]:
@@ -64,6 +66,7 @@ def read_example(serialized: bytes) -> Tuple[jax.Array, jax.Array]:
 
     return (inputs, labels_landcover, labels_lst)
 
+
 # %%
 def interpolate_invalid_output_temperatures(temperatures, valid_range=(200, 330)):
     """Interpolate temperatures outside the valid range using Gaussian filtering."""
@@ -72,18 +75,26 @@ def interpolate_invalid_output_temperatures(temperatures, valid_range=(200, 330)
     temperatures[invalid_mask] = temperatures_filtered[invalid_mask]
     return temperatures
 
+
 # %%
 def interpolate_invalid_temperatures(data, valid_range=(200, 330), band_index=2):
     """Interpolate temperatures outside the valid range using Gaussian filtering."""
     errs = 0
     for i in range(data.shape[0]):
-        invalid_mask = (data[i, :, :, band_index] < valid_range[0]) | (data[i, :, :, band_index] > valid_range[1])
+        invalid_mask = (data[i, :, :, band_index] < valid_range[0]) | (
+            data[i, :, :, band_index] > valid_range[1]
+        )
         if np.any(invalid_mask):  # Only apply filtering if there are any invalid values
             errs += 1
             valid_temperatures = gaussian_filter(data[i, :, :, band_index], sigma=1)
-            interpolated_values = np.where(invalid_mask, valid_temperatures, data[i, :, :, band_index])
-            data[i, :, :, band_index] = np.clip(interpolated_values, valid_range[0], valid_range[1])
+            interpolated_values = np.where(
+                invalid_mask, valid_temperatures, data[i, :, :, band_index]
+            )
+            data[i, :, :, band_index] = np.clip(
+                interpolated_values, valid_range[0], valid_range[1]
+            )
     return data
+
 
 # %%
 def read_dataset(
@@ -133,8 +144,10 @@ def read_dataset(
         test_labels_lst,
     )
 
+
 # %%
 # x, y = read_dataset("../data/v2/climate_change/", 0.9)
+
 
 # %%
 # Define the Fully Convolutional Network.
@@ -149,6 +162,7 @@ class CNN_LandCover(nn.Module):
 
         return x
 
+
 # %%
 class CNN_LST(nn.Module):
     @nn.compact
@@ -162,12 +176,14 @@ class CNN_LST(nn.Module):
 
         return x
 
+
 # %%
 @jax.jit
 def apply_lc(state, images, lc):
     """Computes gradients, loss and accuracy for a single batch."""
-    print(f"images shape: {images.shape}, lc shape: {lc.shape}")
-    one_hot = jax.nn.one_hot(lc[:,:,:,-1], NUM_CLASSES)
+    # print(f"images shape: {images.shape}, lc shape: {lc.shape}")
+    one_hot = jax.nn.one_hot(lc[:, :, :, -1], NUM_CLASSES)
+
     def loss_fn(params):
         logits = state.apply_fn({"params": params}, images)
         loss = optax.losses.softmax_cross_entropy(
@@ -179,7 +195,8 @@ def apply_lc(state, images, lc):
     (loss, logits), grads = grad_fn(state.params)
     accuracy_c = jnp.mean(jnp.argmax(logits, -1) == jnp.argmax(one_hot, -1))
 
-    return grads, loss, accuracy_c
+    return grads, loss, accuracy_c, logits
+
 
 # %%
 @jax.jit
@@ -197,10 +214,12 @@ def apply_lst(state, images, lst):
     loss, grads = grad_fn(state.params)
     return grads, loss, None
 
+
 # %%
 @jax.jit
 def update_model(state, grads):
     return state.apply_gradients(grads=grads)
+
 
 # %%
 def train_epoch(state, train_ds, batch_size, rng, label: Literal["lc", "lst"]):
@@ -222,7 +241,7 @@ def train_epoch(state, train_ds, batch_size, rng, label: Literal["lc", "lst"]):
         if label == "lc":
             batch_labels = jnp.array(train_ds[1][perm, ...], dtype=jnp.uint8)
             # print(f"Batch images shape: {batch_images.shape}, Batch labels shape: {batch_labels.shape}")
-            grads, loss, acc = apply_lc(state, batch_images, batch_labels)
+            grads, loss, acc, _ = apply_lc(state, batch_images, batch_labels)
         else:
             batch_labels = jnp.array(train_ds[2][perm, ...], dtype=jnp.float32)
             grads, loss, acc = apply_lst(state, batch_images, batch_labels)
@@ -236,6 +255,7 @@ def train_epoch(state, train_ds, batch_size, rng, label: Literal["lc", "lst"]):
         train_accuracy = np.mean(epoch_accuracy)
     return state, train_loss, train_accuracy
 
+
 # %%
 def create_train_state(rng, config, label: Literal["lc", "lst"]):
     """Creates initial `TrainState`."""
@@ -245,9 +265,20 @@ def create_train_state(rng, config, label: Literal["lc", "lst"]):
         model = CNN_LST()
     else:
         raise ValueError(f"Unknown label: {label}")
-    params = model.init(rng, jnp.ones([1, 128, 128, NUM_INPUTS]))["params"]
+    params = model.init(
+        rng, jnp.ones([1, config.img_size, config.img_size, NUM_INPUTS])
+    )["params"]
     tx = optax.adam(config.learning_rate)
     return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
+
+def save_predictions(epoch, images, labels, preds, save_dir, label_type):
+    epoch_dir = os.path.join(save_dir, f"epoch_{epoch}/{label_type}")
+    os.makedirs(epoch_dir, exist_ok=True)
+
+    np.save(os.path.join(epoch_dir, "images.npy"), images)
+    np.save(os.path.join(epoch_dir, "labels.npy"), labels)
+    np.save(os.path.join(epoch_dir, "preds.npy"), preds)
 
 
 @app.function(
@@ -263,6 +294,8 @@ def train_and_evaluate(
     work_dir: str,
     ckpt_dir: str,
     label: Literal["lc", "lst"],
+    train_save_dir: str,
+    test_save_dir: str,
 ) -> train_state.TrainState:
     """Execute model training and evaluation loop.
 
@@ -281,13 +314,13 @@ def train_and_evaluate(
 
     shutil.rmtree(ckpt_dir, ignore_errors=True)
 
-    ckpt_options = ocp.CheckpointManagerOptions(
-        max_to_keep=3,
-    )
-    ckpt_manager = ocp.CheckpointManager(
-        ocp.test_utils.erase_and_create_empty(ckpt_dir),
-        options=ckpt_options,
-    )
+    # ckpt_options = ocp.CheckpointManagerOptions(
+    #     max_to_keep=3,
+    # )
+    # ckpt_manager = ocp.CheckpointManager(
+    #     ocp.test_utils.erase_and_create_empty(ckpt_dir),
+    #     options=ckpt_options,
+    # )
 
     print(f"JAX process: {jax.process_index()} / {jax.process_count()}")
     print(f"JAX local devices: {jax.local_devices()}")
@@ -317,7 +350,9 @@ def train_and_evaluate(
         )
 
         if label == "lc":
-            _, test_loss, test_accuracy = apply_lc(state, test_images, test_labels)
+            _, test_loss, test_accuracy, test_logits = apply_lc(
+                state, test_images, test_labels
+            )
         elif label == "lst":
             _, test_loss, test_accuracy = apply_lst(state, test_images, test_labels)
         else:
@@ -334,48 +369,41 @@ def train_and_evaluate(
         summary_writer.scalar("train_loss", train_loss, epoch)
         summary_writer.scalar("test_loss", test_loss, epoch)
 
-        ckpt = {"model": state}
-        ckpt_manager.save(epoch, args=ocp.args.StandardSave(ckpt))
-        ckpt_manager.wait_until_finished()
+        checkpoints.save_checkpoint(ckpt_dir, state, epoch, prefix="", keep=3)
+        if label == "lc":
+            if epoch % 10 == 0:
+                # Save test preds
+                save_predictions(
+                    epoch, test_images, test_labels, test_logits, train_save_dir, label
+                )
+        # ckpt = {"model": state}
+        # ckpt_manager.save(epoch, args=ocp.args.StandardSave(ckpt))
+        # ckpt_manager.wait_until_finished()
 
     summary_writer.flush()
     volume.commit()
     return state
 
-# %%
-if __name__ == "__main__":
-    config = ml_collections.ConfigDict()
-
-    config.learning_rate = 0.0002
-    config.batch_size = 32
-    config.num_epochs = 100
-    config.train_test_split = 0.9
-    with app.run(detach=True):
-        train_and_evaluate.remote(
-            config,
-            "/vol/new/",
-            "/vol/flax/lc2/logs",
-            "/vol/flax/lc2/checkpoints",
-            "lc",
-        )
 
 # %%
-# rng = jax.random.key(0)
-# rng, init_rng = jax.random.split(rng)
-# state = create_train_state(init_rng, config, "lc")
-# pytree = {"model": state}
-# ckpt_dir = os.path.abspath("../inference/latest/flax/lc/checkpoints/")
-# ckpt_options = ocp.CheckpointManagerOptions(
-#     max_to_keep=3,
-# )
-# ckpt_manager = ocp.CheckpointManager(
-#     ckpt_dir,
-#     options=ckpt_options,
-# )
-# model = ckpt_manager.restore(99, args=ocp.args.StandardRestore(pytree))
-# model
+config = ml_collections.ConfigDict()
+
+config.learning_rate = 0.001
+config.batch_size = 16
+config.num_epochs = 250
+config.img_size = 128
+config.train_test_split = 0.9
+
 
 # %%
-
-
-
+@app.local_entrypoint()
+def main():
+    train_and_evaluate.remote(
+        config,
+        "/vol/v2/data/",
+        "/vol/v2/flax/lc/logs",
+        "/vol/v2/flax/lc/checkpoints",
+        "lc",
+        "/vol/v2/flax/lc/train",
+        "/vol/v2/flax/lc/test",
+    )
