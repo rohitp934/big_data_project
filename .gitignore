@@ -9,5 +9,4 @@ data*/
 /.ipynb_checkpoints
 /actual
 /trainer/__pycache__/
-inference/
 models/
