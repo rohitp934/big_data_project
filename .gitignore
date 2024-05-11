@@ -1,3 +1,12 @@
 .DS_Store
 *.pdf
 data*/
+/.idea
+/modal/
+/trial-data
+/bigdata/
+/big-data/
+/.ipynb_checkpoints
+/actual
+/trainer/__pycache__/
+models/
