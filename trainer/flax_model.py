@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import ml_collections
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
 import tensorflow as tf
 from flax.metrics import tensorboard
 
@@ -394,7 +393,7 @@ def train_and_evaluate(
 config = ml_collections.ConfigDict()
 
 config.learning_rate = 0.001
-config.batch_size = 8
+config.batch_size = 16
 config.num_epochs = 250
 config.img_size = 128
 config.train_test_split = 0.9
